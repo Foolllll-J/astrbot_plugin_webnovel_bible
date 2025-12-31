@@ -1,0 +1,14 @@
+{
+    "group_whitelist": {
+        "description": "群聊白名单",
+        "hint": "只在这些群聊中响应指令。留空则全局响应。",
+        "type": "list",
+        "default": []
+    },
+    "max_records_per_book": {
+        "description": "每本书最大扫书记录数",
+        "hint": "单本书籍展示时，最多展示多少条扫书记录。超过部分将被忽略。",
+        "type": "int",
+        "default": 20
+    }
+}
