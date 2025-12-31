@@ -18,6 +18,8 @@ class WebnovelBiblePlugin(Star):
         self.config = config or {}
         self.group_whitelist = self.config.get("group_whitelist", [])
         self.max_records_per_book = self.config.get("max_records_per_book", 20)
+        self.max_review_length = self.config.get("max_review_length", 4000)
+        self.max_batch_chars = self.config.get("max_batch_chars", 5000)
         
         # 路径设置
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_webnovel_bible")
@@ -103,6 +105,7 @@ class WebnovelBiblePlugin(Star):
         """网文扫书宝典查询
         用法: 
         /扫书 <书名/作者> - 搜索书籍
+        /扫书 <书名/作者> <序号> - 搜索并直接查看第 N 个结果
         /扫书 <序号> - 查看搜索结果中的详细信息
         """
         await self._ensure_initialized()
@@ -118,14 +121,21 @@ class WebnovelBiblePlugin(Star):
             yield event.plain_result("请输入书名或作者进行查询，例如: /扫书 极品家丁")
             return
 
-        query = " ".join(parts[1:])
         user_id = event.get_sender_id()
         state = self._get_user_state(user_id)
         
-        logger.debug(f"用户 {user_id} 扫书查询: {query}")
+        # 识别末尾的序号（如：/扫书 极品家丁 1）
+        direct_idx = None
+        if len(parts) > 2 and parts[-1].isdigit():
+            direct_idx = int(parts[-1]) - 1
+            query = " ".join(parts[1:-1])
+        else:
+            query = " ".join(parts[1:])
+        
+        logger.debug(f"用户 {user_id} 扫书查询: {query}, 直接序号: {direct_idx + 1 if direct_idx is not None else '无'}")
 
-        # 检查是否是序号
-        if query.isdigit():
+        # 检查是否是纯序号（如：/扫书 1）
+        if query.isdigit() and direct_idx is None:
             idx = int(query) - 1
             if state["results"] and 0 <= idx < len(state["results"]):
                 novel_id = state["results"][idx]["id"]
@@ -137,13 +147,9 @@ class WebnovelBiblePlugin(Star):
                 logger.warning(f"用户 {user_id} 输入无效序号: {query}")
 
         # 执行搜索
-        async for res in self.search_novels(event, query, state):
+        async for res in self.search_novels(event, query, state, direct_idx):
             yield res
 
-    @filter.command("百科")
-    async def handle_wiki(self, event: AstrMessageEvent):
-        """网文术语百科查询 (已弃用，请使用 /防御 /郁闷 /雷点 /术语)"""
-        yield event.plain_result("'/百科' 指令已弃用。请根据类别使用以下指令：\n/防御、/郁闷、/雷点、/术语\n例如：/郁闷 列表 或 /郁闷 兄弟情节")
 
     @filter.command("防御")
     async def handle_defense(self, event: AstrMessageEvent):
@@ -183,7 +189,7 @@ class WebnovelBiblePlugin(Star):
             if not names:
                 yield event.plain_result(f"暂无{category}术语数据。")
                 return
-            resp = f"📜 {category}术语列表：\n"
+            resp = f"📜 {category}列表：\n"
             resp += "、".join(names)
             yield event.plain_result(resp)
             return
@@ -240,7 +246,7 @@ class WebnovelBiblePlugin(Star):
             msg += f"\n{item['解释']}\n"
         yield event.plain_result(msg.strip())
 
-    async def search_novels(self, event, query, state):
+    async def search_novels(self, event, query, state, direct_idx=None):
         logger.info(f"正在数据库中搜索书籍: {query}")
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -261,15 +267,27 @@ class WebnovelBiblePlugin(Star):
                 return
 
             logger.info(f"搜索到 {len(rows)} 本书籍。")
+            
+            # 更新状态，以便后续使用序号查询
+            state["results"] = [{"id": r["id"], "title": r["title"]} for r in rows]
+            state["keyword"] = query
+
+            if direct_idx is not None:
+                if 0 <= direct_idx < len(rows):
+                    logger.info(f"直接跳转到搜索结果的第 {direct_idx + 1} 项: {rows[direct_idx]['title']}")
+                    async for res in self.show_details(event, rows[direct_idx]["id"]):
+                        yield res
+                    return
+                else:
+                    logger.warning(f"直接跳转序号 {direct_idx + 1} 超出搜索结果范围 (共 {len(rows)} 项)")
+                    # 如果序号超出范围，则回退到显示列表
+
             if len(rows) == 1:
                 # 只有一个结果，直接显示扫书记录
                 async for res in self.show_details(event, rows[0]["id"]):
                     yield res
             else:
-                # 多个结果，存入状态并显示列表
-                state["results"] = [{"id": r["id"], "title": r["title"]} for r in rows]
-                state["keyword"] = query
-                
+                # 多个结果，显示列表
                 resp = f"找到以下与 '{query}' 相关的书籍：\n"
                 for i, row in enumerate(rows, 1):
                     author = row["author"] or "未知"
@@ -303,7 +321,7 @@ class WebnovelBiblePlugin(Star):
 
             # 获取所有扫书记录
             sql = f"""
-                SELECT r.reviewer, r.source_url, r.review_date, r.category, r.attributes, r.full_text
+                SELECT r.reviewer, r.source_url, r.review_date, r.category, r.attributes
                 FROM reviews r
                 JOIN novel_review_map m ON r.id = m.review_id
                 WHERE m.novel_id = ?
@@ -327,10 +345,18 @@ class WebnovelBiblePlugin(Star):
             clean_title = novel['title']
             clean_author = self._clean_text(novel['author'])
 
+            nodes = []
+            batch_total_chars = 0
+            batch_count = 1
+            
             for i, rev in enumerate(reviews, 1):
                 reviewer = self._clean_text(rev['reviewer']) or '匿名'
                 msg = f"【记录 #{i}】 {rev['category'] or '扫书'}\n"
-                msg += f"扫书人：{reviewer} | 日期：{rev['review_date'] or '未知'}\n"
+                date_str = rev['review_date']
+                if date_str:
+                    msg += f"扫书人：{reviewer} | 日期：{date_str}\n"
+                else:
+                    msg += f"扫书人：{reviewer}\n"
                 
                 # 来源展示
                 attrs = json.loads(rev['attributes'])
@@ -364,14 +390,36 @@ class WebnovelBiblePlugin(Star):
                         
                     msg += f"{emoji} {key}：{value}\n"
                 
-                # 正文描述
-                content = rev['full_text'] or attrs.get("其他说明")
+                # 正文描述 (参考 cli_explorer.py 优先从 attributes["其他说明"] 获取)
+                content = attrs.get("其他说明")
                 if content:
                     msg += f"\n[正文描述]\n{str(content).strip()}"
                 
-                nodes.append(Node(uin=self_id, name=bot_name, content=[Plain(text=msg.strip())]))
+                # 设置单篇扫书记录的长度限制，防止合并转发失败（通常限制在 4000 字符/汉字以内）
+                max_len = self.max_review_length
+                final_msg = msg.strip()
+                if len(final_msg) > max_len:
+                    final_msg = final_msg[:max_len] + "\n\n...(内容过长，已截断)"
+                    logger.warning(f"书籍 ID {novel_id} 的记录 #{i} 长度超过 {max_len}，已截断。")
+                
+                current_len = len(final_msg)
+                
+                # 检查是否超过批次字符上限
+                if nodes and batch_total_chars + current_len > self.max_batch_chars:
+                    logger.info(f"书籍 ID {novel_id} 发送批次 {batch_count}，共 {len(nodes)} 条记录，总字符数: {batch_total_chars}")
+                    yield event.chain_result([Nodes(nodes=nodes)])
+                    nodes = []
+                    batch_total_chars = 0
+                    batch_count += 1
+                    await asyncio.sleep(0.5)
 
-            yield event.chain_result([Nodes(nodes=nodes)])
+                nodes.append(Node(uin=self_id, name=bot_name, content=[Plain(text=final_msg)]))
+                batch_total_chars += current_len
+
+            # 发送最后一批
+            if nodes:
+                logger.info(f"书籍 ID {novel_id} 发送批次 {batch_count}，共 {len(nodes)} 条记录，总字符数: {batch_total_chars}")
+                yield event.chain_result([Nodes(nodes=nodes)])
 
     @filter.command("扫书统计")
     async def handle_saoshu_stats(self, event: AstrMessageEvent):

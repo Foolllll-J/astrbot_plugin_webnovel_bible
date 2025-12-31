@@ -9,6 +9,18 @@
         "description": "每本书最大扫书记录数",
         "hint": "单本书籍展示时，最多展示多少条扫书记录。超过部分将被忽略。",
         "type": "int",
-        "default": 20
+        "default": 10
+    },
+    "max_review_length": {
+        "description": "单条扫书记录最大长度 (字符)",
+        "hint": "单条扫书记录展示时，最多保留多少个字符。超过部分将被截断。",
+        "type": "int",
+        "default": 2000
+    },
+    "max_batch_chars": {
+        "description": "单次合并转发最大字符总数",
+        "hint": "单次发送的合并消息中，所有记录的总字符数上限。超过将自动分批发送。",
+        "type": "int",
+        "default": 4000
     }
 }

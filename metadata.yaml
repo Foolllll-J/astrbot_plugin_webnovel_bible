@@ -1,6 +1,6 @@
 name: astrbot_plugin_webnovel_bible
 display_name: 扫书宝典
 desc: 集成“扫书宝典”，支持书名、作者查询及雷点郁闷展示。
-version: v1.0.0
+version: v0.0.1
 author: Foolllll
 repo: https://github.com/Foolllll-J/astrbot_plugin_webnovel_bible
