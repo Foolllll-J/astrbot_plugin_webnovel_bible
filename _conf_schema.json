@@ -15,7 +15,7 @@
         "description": "单条扫书记录最大长度 (字符)",
         "hint": "单条扫书记录展示时，最多保留多少个字符。超过部分将被截断。",
         "type": "int",
-        "default": 2000
+        "default": 4000
     },
     "max_batch_chars": {
         "description": "单次合并转发最大字符总数",
