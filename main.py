@@ -11,7 +11,7 @@ from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
 from astrbot.api.message_components import *
 
-@register("astrbot_plugin_webnovel_bible", "Foolllll", "集成了扫书宝典数据库，支持书名/作者查询、雷点郁闷展示以及术语百科查询。", "1.0.0", "https://github.com/Foolllll-J/astrbot_plugin_webnovel_bible")
+@register("astrbot_plugin_webnovel_bible", "Foolllll", "集成了扫书宝典，支持查询书名/作者获取小说的扫书记录以及相关术语查询。", "0.1", "https://github.com/Foolllll-J/astrbot_plugin_webnovel_bible")
 class WebnovelBiblePlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
