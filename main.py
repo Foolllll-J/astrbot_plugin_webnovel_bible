@@ -11,7 +11,7 @@ from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
 from astrbot.api.message_components import *
 
-@register("astrbot_plugin_webnovel_bible", "Foolllll", "集成了扫书宝典，支持查询书名/作者获取小说的扫书记录以及相关术语查询。", "0.1", "https://github.com/Foolllll-J/astrbot_plugin_webnovel_bible")
+@register("astrbot_plugin_webnovel_bible", "Foolllll", "集成了扫书宝典，支持查询书名/作者获取小说的扫书记录以及相关术语查询。", "1.0", "https://github.com/Foolllll-J/astrbot_plugin_webnovel_bible")
 class WebnovelBiblePlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -251,7 +251,7 @@ class WebnovelBiblePlugin(Star):
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             # 模糊匹配书名、别名或作者
-            sql = f"""
+            sql = """
                 SELECT id, title, author, platform, aliases 
                 FROM novels 
                 WHERE title LIKE ? OR author LIKE ? OR aliases LIKE ?
@@ -320,15 +320,15 @@ class WebnovelBiblePlugin(Star):
                 return
 
             # 获取所有扫书记录
-            sql = f"""
+            sql = """
                 SELECT r.reviewer, r.source_url, r.review_date, r.category, r.attributes
                 FROM reviews r
                 JOIN novel_review_map m ON r.id = m.review_id
                 WHERE m.novel_id = ?
                 ORDER BY r.review_date DESC
-                LIMIT {self.max_records_per_book}
+                LIMIT ?
             """
-            async with db.execute(sql, (novel_id,)) as cursor:
+            async with db.execute(sql, (novel_id, self.max_records_per_book)) as cursor:
                 reviews = await cursor.fetchall()
 
             logger.info(f"书籍 《{novel['title']}》 获取了 {len(reviews)} 条扫书记录 (上限 {self.max_records_per_book})。")
