@@ -11,7 +11,7 @@ from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
 from astrbot.api.message_components import *
 
-@register("astrbot_plugin_webnovel_bible", "Foolllll", "集成了扫书宝典，支持查询书名/作者获取小说的扫书记录以及相关术语查询。", "1.0", "https://github.com/Foolllll-J/astrbot_plugin_webnovel_bible")
+
 class WebnovelBiblePlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -250,15 +250,24 @@ class WebnovelBiblePlugin(Star):
         logger.info(f"正在数据库中搜索书籍: {query}")
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            # 模糊匹配书名、别名或作者
+            # 模糊匹配书名、别名或作者，优先按热度排序
             sql = """
-                SELECT id, title, author, platform, aliases 
-                FROM novels 
-                WHERE title LIKE ? OR author LIKE ? OR aliases LIKE ?
-                LIMIT 10
+                SELECT n.id, n.title, n.author, n.platform, n.aliases,
+                       COUNT(m.review_id) as review_count
+                FROM novels n
+                LEFT JOIN novel_review_map m ON n.id = m.novel_id
+                WHERE n.title LIKE ? OR n.author LIKE ? OR n.aliases LIKE ?
+                GROUP BY n.id
+                ORDER BY
+                    -- 优先级1: 书名完全匹配
+                    CASE WHEN n.title = ? THEN 0 ELSE 1 END,
+                    -- 优先级2: 扫书记录数量降序（热度）
+                    review_count DESC
+                LIMIT 20
             """
             search_pattern = f"%{query}%"
-            async with db.execute(sql, (search_pattern, search_pattern, search_pattern)) as cursor:
+            starts_with_pattern = f"{query}%"
+            async with db.execute(sql, (search_pattern, search_pattern, search_pattern, query)) as cursor:
                 rows = await cursor.fetchall()
 
             if not rows:
@@ -290,8 +299,12 @@ class WebnovelBiblePlugin(Star):
                 # 多个结果，显示列表
                 resp = f"找到以下与 '{query}' 相关的书籍：\n"
                 for i, row in enumerate(rows, 1):
-                    author = row["author"] or "未知"
-                    resp += f"{i}. 《{row['title']}》 - {author}\n"
+                    author = row["author"]
+                    # 只有当作者不为"未知"且不为空时才显示
+                    if author and author != "未知":
+                        resp += f"{i}. 《{row['title']}》 - {author}\n"
+                    else:
+                        resp += f"{i}. 《{row['title']}》\n"
                 resp += "\n请输入 '/扫书 <序号>' 查看详细扫书记录。"
                 yield event.plain_result(resp)
 
