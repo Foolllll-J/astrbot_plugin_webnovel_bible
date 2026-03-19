@@ -1,10 +1,4 @@
 {
-    "max_records_per_book": {
-        "description": "单部作品展示记录上限",
-        "hint": "查询单部作品扫书时，最多展示的记录条数。适当限制该值可提升消息发送成功率并优化阅读体验。",
-        "type": "int",
-        "default": 5
-    },
     "max_review_length": {
         "description": "单条记录最大长度 (字符)",
         "hint": "单条扫书记录展示时，最多保留多少个字符。",

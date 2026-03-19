@@ -16,7 +16,6 @@ class WebnovelBiblePlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
         self.config = config or {}
-        self.max_records_per_book = self.config.get("max_records_per_book", 20)
         self.max_review_length = self.config.get("max_review_length", 4000)
         self.max_batch_chars = self.config.get("max_batch_chars", 5000)
         self.overflow_strategy = self.config.get("overflow_strategy", "truncate")
@@ -686,8 +685,7 @@ class WebnovelBiblePlugin(Star):
             if attr_title and compare_title != attr_title:
                 continue
             record_idx += 1
-            if record_idx > self.max_records_per_book:
-                break
+            # 记录展示上限由发送批次/单次消息限制控制
 
             header = f"【记录 #{record_idx}】 {rev['category'] or '扫书'}\n"
             date_str = rev['review_date']
@@ -822,12 +820,14 @@ class WebnovelBiblePlugin(Star):
             end = min(len(messages), offset + limit)
             chunk = messages[offset:end]
             if chunk:
+                detail["offset"] = end
                 success = await self._send_tg_expandable_blocks(event, chunk)
                 if not success:
                     for m in chunk:
                         yield event.plain_result(m)
                 else:
                     yield event.stop_event()
+                return
             detail["offset"] = end
             return
 
@@ -915,7 +915,7 @@ class WebnovelBiblePlugin(Star):
         reviews.sort(key=lambda x: (x[0], x[1]["review_priority"], x[1]["review_date"] or ""), reverse=False)
         reviews = [r for _, r in reviews]
 
-        logger.info(f"书籍 《{novel['title']}》 获取了 {len(reviews)} 条扫书记录 (上限 {self.max_records_per_book})。")
+        logger.info(f"书籍 《{novel['title']}》 获取了 {len(reviews)} 条扫书记录。")
         self_id = event.get_self_id()
         bot_name = "扫书记录"
 
@@ -940,8 +940,7 @@ class WebnovelBiblePlugin(Star):
             if attr_title and compare_title != attr_title:
                 continue
             record_idx += 1
-            if record_idx > self.max_records_per_book:
-                break
+            # 记录展示上限由发送批次/单次消息限制控制
 
             header = f"【记录 #{record_idx}】 {rev['category'] or '扫书'}\n"
             date_str = rev['review_date']
