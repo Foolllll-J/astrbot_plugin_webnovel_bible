@@ -16,7 +16,6 @@ class WebnovelBiblePlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
         self.config = config or {}
-        self.group_whitelist = self.config.get("group_whitelist", [])
         self.max_records_per_book = self.config.get("max_records_per_book", 20)
         self.max_review_length = self.config.get("max_review_length", 4000)
         self.max_batch_chars = self.config.get("max_batch_chars", 5000)
@@ -170,12 +169,6 @@ class WebnovelBiblePlugin(Star):
         """
         await self._ensure_initialized()
         
-        # 群组白名单检查
-        if self.group_whitelist:
-            group_id = event.message_obj.group_id
-            if group_id and group_id not in self.group_whitelist:
-                return
-
         parts = event.message_str.strip().split()
         if len(parts) < 2:
             yield event.plain_result("请输入书名或作者进行查询，例如: /扫书 极品家丁")
@@ -450,6 +443,24 @@ class WebnovelBiblePlugin(Star):
         text = re.split(r'\s+\d+(?:\.\d+)?[wW万]?(?:字|$)|\s+', text)[0].strip()
         return text
 
+    @staticmethod
+    def _strip_leading_separators(text: str) -> str:
+        if not text:
+            return ""
+        lines = text.splitlines()
+
+        def is_separator_line(line: str) -> bool:
+            stripped = line.strip()
+            if not stripped:
+                return True
+            return len(stripped) >= 3 and all(ch in "-=_*~" for ch in stripped)
+
+        while lines and is_separator_line(lines[0]):
+            lines.pop(0)
+        while lines and is_separator_line(lines[-1]):
+            lines.pop()
+        return "\n".join(lines).strip()
+
     def _normalize_title(self, title):
         if not title:
             return ""
@@ -693,7 +704,7 @@ class WebnovelBiblePlugin(Star):
                 header += f"来源：{clean_source}\n"
             header += "-" * 20 + "\n"
 
-            body = ""
+            tag_lines = []
             for key, value in attrs.items():
                 if self._is_empty_value(value):
                     continue
@@ -711,14 +722,18 @@ class WebnovelBiblePlugin(Star):
                         if tag in key:
                             emoji = e
                             break
-                body += f"{emoji} {key}：{value}\n"
+                tag_lines.append(f"{emoji} {key}：{value}")
 
             content = attrs.get("其他说明")
+            body_lines = list(tag_lines)
             if content:
-                content_str = str(content).strip()
+                content_str = self._strip_leading_separators(str(content))
                 if re.search(r"[A-Za-z0-9\u4e00-\u9fff]", content_str):
-                    body += f"\n{'-' * 20}\n{content_str}"
+                    if body_lines:
+                        body_lines.append("-" * 20)
+                    body_lines.append(content_str)
 
+            body = "\n".join(body_lines)
             full_msg = (header + body).strip()
             if not body.strip():
                 continue
@@ -943,7 +958,7 @@ class WebnovelBiblePlugin(Star):
                 header += f"来源：{clean_source}\n"
             header += "-" * 20 + "\n"
 
-            body = ""
+            tag_lines = []
             for key, value in attrs.items():
                 if self._is_empty_value(value):
                     continue
@@ -961,14 +976,18 @@ class WebnovelBiblePlugin(Star):
                         if tag in key:
                             emoji = e
                             break
-                body += f"{emoji} {key}：{value}\n"
+                tag_lines.append(f"{emoji} {key}：{value}")
 
             content = attrs.get("其他说明")
+            body_lines = list(tag_lines)
             if content:
-                content_str = str(content).strip()
+                content_str = self._strip_leading_separators(str(content))
                 if re.search(r"[A-Za-z0-9\u4e00-\u9fff]", content_str):
-                    body += f"\n{'-' * 20}\n{content_str}"
+                    if body_lines:
+                        body_lines.append("-" * 20)
+                    body_lines.append(content_str)
 
+            body = "\n".join(body_lines)
             full_msg = (header + body).strip()
             if not body.strip():
                 continue

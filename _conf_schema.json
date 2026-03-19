@@ -1,10 +1,4 @@
 {
-    "group_whitelist": {
-        "description": "群聊白名单",
-        "hint": "只在这些群聊中响应指令。留空则全局响应。",
-        "type": "list",
-        "default": []
-    },
     "max_records_per_book": {
         "description": "单部作品展示记录上限",
         "hint": "查询单部作品扫书时，最多展示的记录条数。适当限制该值可提升消息发送成功率并优化阅读体验。",

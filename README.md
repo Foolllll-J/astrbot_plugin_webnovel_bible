@@ -44,7 +44,6 @@
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
-| `group_whitelist` | `list` | `[]` | 群聊白名单。留空则全局响应。 |
 | `max_records_per_book` | `int` | `5` | 单部作品详情展示记录上限。 |
 | `max_review_length` | `int` | `2000` | 单条记录最大长度。 |
 | `overflow_strategy` | `string` | `truncate` | 单记录超长处理策略，可选 `truncate` / `split`。 |
