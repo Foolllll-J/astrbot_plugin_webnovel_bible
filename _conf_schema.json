@@ -13,14 +13,43 @@
     },
     "max_review_length": {
         "description": "单条记录最大长度 (字符)",
-        "hint": "单条扫书记录展示时，最多保留多少个字符。超过部分将被截断。",
+        "hint": "单条扫书记录展示时，最多保留多少个字符。",
         "type": "int",
         "default": 2000
+    },
+    "overflow_strategy": {
+        "description": "单记录超长处理策略",
+        "hint": "当单条扫书记录超过最大长度时的处理方式。",
+        "type": "string",
+        "default": "truncate",
+        "options": [
+            "truncate",
+            "split"
+        ],
+        "labels": [
+            "截断",
+            "分段"
+        ]
     },
     "max_batch_chars": {
         "description": "单次合并最大字符总数",
         "hint": "单次发送的合并消息中，所有记录的总字符数上限。超过将自动分批发送。",
         "type": "int",
         "default": 2000
+    },
+    "max_messages_per_request": {
+        "description": "单次发送消息上限",
+        "hint": "限制单次查询最多发送的消息数量，防止刷屏。",
+        "type": "int",
+        "default": 3
+    },
+    "uploaded_db_files": {
+        "description": "上传扫书数据库",
+        "hint": "上传 .db 文件后将参与查询，上传顺序越靠前优先级越高。",
+        "type": "file",
+        "default": [],
+        "file_types": [
+            "db"
+        ]
     }
 }
