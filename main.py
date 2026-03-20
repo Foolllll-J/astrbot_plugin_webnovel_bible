@@ -252,7 +252,7 @@ class WebnovelBiblePlugin(Star):
     async def _handle_category_command(self, event: AstrMessageEvent, category: str):
         parts = event.message_str.strip().split()
         if len(parts) < 2:
-            yield event.plain_result(f"请输入要查询的{category}术语，或输入 '列表' 查看所有。")
+            yield event.plain_result(f"请输入要查询的{category}术语。\n可使用 '{category} 列表' 查看所有。")
             return
 
         query = " ".join(parts[1:])
