@@ -113,7 +113,8 @@ class WebnovelBiblePlugin(Star):
                             if name:
                                 self.terms_data[cat][name] = item
                                 count += 1
-                        self.terms_data[cat] = dict(sorted(self.terms_data[cat].items()))
+                        # 按 JSON 文件顺序展示
+                        self.terms_data[cat] = dict(self.terms_data[cat])
                         logger.info(f"成功加载{cat}分类术语: {count} 条")
                         total_loaded += count
                 except Exception as e:
