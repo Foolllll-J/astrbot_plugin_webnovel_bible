@@ -98,7 +98,13 @@
 ## ❤️ 支持
 
 * [AstrBot 帮助文档](https://astrbot.app)
-* 如果您在使用中遇到错误或有改进建议，欢迎提交 [Issue](https://github.com/Foolllll-J/astrbot_plugin_webnovel_bible)。
+* 如果您在使用中遇到错误或有改进建议，例如扫书中部分条目的书名、作者名收录有误，欢迎通过 [Issue](https://github.com/Foolllll-J/astrbot_plugin_webnovel_bible) 提出。
+
+---
+
+## 💬 交流
+
+欢迎加入网文交流群 [**1062663795**](https://qm.qq.com/cgi-bin/qm/qr?k=zU2UPWyrflqs1sCHufgVRvsejdLSglyP&jump_from=webapi&authKey=Z2Zg79IhS9KXEotmtRbtbabeuZZ0LpztVM+p+V1HyWn9K1JpuaFQr9acnmKK8G5K)，一起推书、吹水~
 
 ---
 
