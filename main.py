@@ -93,7 +93,7 @@ class WebnovelBiblePlugin(Star):
             try:
                 with open(emoji_path, "r", encoding="utf-8") as f:
                     self.tag_emojis = json.load(f)
-                logger.info(f"成功加载 {len(self.tag_emojis)} 个标签 Emoji 映射。")
+                logger.debug(f"成功加载 {len(self.tag_emojis)} 个标签 Emoji 映射。")
             except Exception as e:
                 logger.error(f"加载 tag_emoji.json 失败: {e}")
         else:
@@ -115,13 +115,13 @@ class WebnovelBiblePlugin(Star):
                                 count += 1
                         # 按 JSON 文件顺序展示
                         self.terms_data[cat] = dict(self.terms_data[cat])
-                        logger.info(f"成功加载{cat}分类术语: {count} 条")
+                        logger.debug(f"成功加载{cat}分类术语: {count} 条")
                         total_loaded += count
                 except Exception as e:
                     logger.error(f"加载术语文件 {filename} 失败: {e}")
             else:
                 logger.warning(f"术语文件不存在: {filename}")
-        logger.info(f"术语资源加载完成，共计 {total_loaded} 条记录。")
+        logger.debug(f"术语资源加载完成，共计 {total_loaded} 条记录。")
 
     async def _ensure_initialized(self):
         async with self._init_lock:
@@ -129,7 +129,7 @@ class WebnovelBiblePlugin(Star):
                 # 始终使用资源库覆盖数据目录中的默认数据库，确保更新生效
                 if os.path.exists(self.resource_db_path):
                     shutil.copy(self.resource_db_path, self.db_path)
-                    logger.info(f"已将数据库从资源目录复制到数据目录: {self.db_path}")
+                    logger.debug(f"已将数据库从资源目录复制到数据目录: {self.db_path}")
                 else:
                     logger.error("资源目录中未找到 webnovel.db，请检查插件安装是否完整。")
 
@@ -204,7 +204,7 @@ class WebnovelBiblePlugin(Star):
                 novel_id = state["results"][idx]["id"]
                 db_path = state["results"][idx].get("db_path")
                 ids_by_db = state["results"][idx].get("ids_by_db")
-                logger.info(f"用户 {user_id} 选择序号 {query}, 书籍 ID: {novel_id}")
+                logger.debug(f"用户 {user_id} 选择序号 {query}, 书籍 ID: {novel_id}")
                 title = state["results"][idx].get("title")
                 detail = {
                     "novel_id": novel_id,
@@ -321,7 +321,7 @@ class WebnovelBiblePlugin(Star):
         yield event.plain_result(msg.strip())
 
     async def search_novels(self, event, query, state, direct_idx=None):
-        logger.info(f"正在数据库中搜索书籍: {query}")
+        logger.debug(f"正在数据库中搜索书籍: {query}")
         # 多库搜索：上传库优先
         sql = """
             SELECT n.id, n.title, n.author, n.platform, n.aliases,
@@ -390,7 +390,7 @@ class WebnovelBiblePlugin(Star):
 
         if direct_idx is not None:
             if 0 <= direct_idx < len(rows):
-                logger.info(f"直接跳转到搜索结果的第 {direct_idx + 1} 项: {rows[direct_idx]['title']}")
+                logger.debug(f"直接跳转到搜索结果的第 {direct_idx + 1} 项: {rows[direct_idx]['title']}")
                 detail = {
                     "novel_id": rows[direct_idx]["id"],
                     "db_path": rows[direct_idx]["db_path"],
@@ -493,7 +493,7 @@ class WebnovelBiblePlugin(Star):
             return [text]
         return [text[i:i + max_len] for i in range(0, len(text), max_len)]
 
-    async def _send_tg_expandable_blocks(self, event: AstrMessageEvent, messages: list[str]) -> bool:
+    async def _send_tg_expandable_blocks(self, event: AstrMessageEvent, messages: list[str], total_count: int = None) -> bool:
         try:
             from telegram import MessageEntity
             from telegram.ext import ExtBot
@@ -515,7 +515,8 @@ class WebnovelBiblePlugin(Star):
         if not messages:
             return False
 
-        summary = f"共 {len(messages)} 条记录，以下为详情："
+        display_count = total_count if total_count is not None else len(messages)
+        summary = f"共 {display_count} 条记录，以下为详情："
         max_len = max(200, int(self._tg_single_message_limit))
         groups = []
 
@@ -605,7 +606,7 @@ class WebnovelBiblePlugin(Star):
         ids_by_db: dict | None = None,
     ) -> list[str]:
         """收集并格式化扫书记录为消息段（按平台策略进行拆分/截断）。"""
-        logger.info(f"正在获取书籍 ID {novel_id} 的扫书详情...")
+        logger.debug(f"正在获取书籍 ID {novel_id} 的扫书详情...")
         novel = None
         reviews = []
         db_paths = list(self.db_paths)
@@ -781,6 +782,7 @@ class WebnovelBiblePlugin(Star):
             yield event.plain_result("已无更多扫书记录。")
             return
 
+        # --- 1. QQ 平台逻辑 (合并转发节点) ---
         if self._is_qq_platform(event):
             self_id = event.get_self_id()
             bot_name = "扫书记录"
@@ -789,267 +791,73 @@ class WebnovelBiblePlugin(Star):
             batch_count = 1
             sent_batches = 0
             idx = offset
+            
             while idx < len(messages):
                 m = messages[idx]
                 current_len = len(m)
+                
+                # 如果当前节点列表不为空，且加上这条会超长，则先发送当前批次
                 if nodes and batch_total_chars + current_len > self.max_batch_chars:
-                    logger.info(f"发送批次 {batch_count}，共 {len(nodes)} 条消息，总字符数: {batch_total_chars}")
+                    # 检查是否是本轮最后一次发送，若是且还有剩余，则塞入提示
+                    if sent_batches + 1 >= self.max_messages_per_request and idx < len(messages):
+                        nodes.append(Node(uin=self_id, name=bot_name, content=[Plain(text=f"💡 还有 {len(messages) - idx} 条记录，发送“/扫书 n”获取下一批。")]))
+                    
                     yield event.chain_result([Nodes(nodes=nodes)])
                     sent_batches += 1
+                    
                     if sent_batches >= self.max_messages_per_request:
+                        nodes = [] # 清空，防止下方重复发送
                         break
+                    
                     nodes = []
                     batch_total_chars = 0
                     batch_count += 1
                     await asyncio.sleep(0.5)
-                    continue
+
                 nodes.append(Node(uin=self_id, name=bot_name, content=[Plain(text=m)]))
                 batch_total_chars += current_len
                 idx += 1
 
-            if idx > offset and sent_batches < self.max_messages_per_request and nodes:
-                logger.info(f"发送批次 {batch_count}，共 {len(nodes)} 条消息，总字符数: {batch_total_chars}")
+            # 处理最后一批残余节点
+            if nodes:
+                if idx < len(messages):
+                    nodes.append(Node(uin=self_id, name=bot_name, content=[Plain(text=f"💡 还有 {len(messages) - idx} 条记录，发送“/扫书 n”获取下一批。")]))
                 yield event.chain_result([Nodes(nodes=nodes)])
-                sent_batches += 1
 
             detail["offset"] = idx
             return
 
-        # TG：按 max_messages_per_request 分批，仍使用折叠引用
+        # --- 2. Telegram 平台逻辑 ---
         if self._is_tg_platform(event) and self._tg_use_fold_default:
             limit = max(1, int(self.max_messages_per_request))
             end = min(len(messages), offset + limit)
             chunk = messages[offset:end]
             if chunk:
+                # 如果没发完，在最后一条追加提示
+                if end < len(messages):
+                    chunk.append(f"💡 还有 {len(messages) - end} 条记录，发送“/扫书 n”获取下一批。")
+                
                 detail["offset"] = end
-                success = await self._send_tg_expandable_blocks(event, chunk)
+                success = await self._send_tg_expandable_blocks(event, chunk, total_count=len(messages))
                 if not success:
                     for m in chunk:
                         yield event.plain_result(m)
                 else:
                     yield event.stop_event()
                 return
-            detail["offset"] = end
             return
 
-        # 其他平台：按 max_messages_per_request 分批
+        # --- 3. 其他普通文本平台 ---
         limit = max(1, int(self.max_messages_per_request))
         end = min(len(messages), offset + limit)
         for m in messages[offset:end]:
             yield event.plain_result(m)
+        
+        # 提示逻辑
+        if end < len(messages):
+            yield event.plain_result(f"💡 还有 {len(messages) - end} 条记录，发送“/扫书 n”获取下一批。")
+            
         detail["offset"] = end
-
-    async def show_details(self, event: AstrMessageEvent, novel_id=None, preferred_db_path: str | None = None, preferred_title: str | None = None, ids_by_db: dict | None = None):
-        logger.info(f"正在获取书籍 ID {novel_id} 的扫书详情...")
-        # 先在所有库中尝试定位该书籍
-        novel = None
-        reviews = []
-        db_paths = list(self.db_paths)
-        if preferred_db_path:
-            # 让指定库优先
-            db_paths = [preferred_db_path] + [p for p in db_paths if p != preferred_db_path]
-        target_title = None
-        if ids_by_db:
-            # 多库：逐库按各自 ID 拉记录
-            for db_path in db_paths:
-                if db_path not in ids_by_db:
-                    continue
-                db_novel_id = ids_by_db[db_path]
-                async with aiosqlite.connect(db_path) as db:
-                    db.row_factory = aiosqlite.Row
-                    async with db.execute("SELECT title, author, platform FROM novels WHERE id = ?", (db_novel_id,)) as cursor:
-                        row = await cursor.fetchone()
-                    if not row:
-                        continue
-                    if novel is None:
-                        novel = row
-                        target_title = self._normalize_title(preferred_title or novel["title"])
-
-                    sql = """
-                        SELECT r.reviewer, r.source_url, r.review_date, r.category, r.attributes,
-                               COALESCE(r.review_priority, 9999) as review_priority
-                        FROM reviews r
-                        JOIN novel_review_map m ON r.id = m.review_id
-                        WHERE m.novel_id = ?
-                        ORDER BY review_priority ASC, r.review_date DESC
-                    """
-                    async with db.execute(sql, (db_novel_id,)) as cursor:
-                        rows = await cursor.fetchall()
-                    source_priority = db_paths.index(db_path)
-                    for r in rows:
-                        reviews.append((source_priority, r))
-        else:
-            # 单库：按传入 ID 查
-            primary_db_path = None
-            for db_path in db_paths:
-                async with aiosqlite.connect(db_path) as db:
-                    db.row_factory = aiosqlite.Row
-                    async with db.execute("SELECT title, author, platform FROM novels WHERE id = ?", (novel_id,)) as cursor:
-                        row = await cursor.fetchone()
-                    if not row:
-                        continue
-                    novel = row
-                    target_title = self._normalize_title(preferred_title or novel["title"])
-                    primary_db_path = db_path
-
-                    sql = """
-                        SELECT r.reviewer, r.source_url, r.review_date, r.category, r.attributes,
-                               COALESCE(r.review_priority, 9999) as review_priority
-                        FROM reviews r
-                        JOIN novel_review_map m ON r.id = m.review_id
-                        WHERE m.novel_id = ?
-                        ORDER BY review_priority ASC, r.review_date DESC
-                    """
-                    async with db.execute(sql, (novel_id,)) as cursor:
-                        rows = await cursor.fetchall()
-                    source_priority = db_paths.index(db_path)
-                    for r in rows:
-                        reviews.append((source_priority, r))
-                    break
-
-        if not novel:
-            logger.error(f"数据库中找不到 ID 为 {novel_id} 的书籍信息")
-            yield event.plain_result("错误：找不到该书籍信息。")
-            return
-
-        # 先按库优先级，再按 review_priority/日期排序
-        reviews.sort(key=lambda x: (x[0], x[1]["review_priority"], x[1]["review_date"] or ""), reverse=False)
-        reviews = [r for _, r in reviews]
-
-        logger.info(f"书籍 《{novel['title']}》 获取了 {len(reviews)} 条扫书记录。")
-        self_id = event.get_self_id()
-        bot_name = "扫书记录"
-
-        if not reviews:
-            if self._is_qq_platform(event):
-                nodes = [Node(uin=self_id, name=bot_name, content=[Plain(text="暂无详细扫书记录。")])]
-                yield event.chain_result([Nodes(nodes=nodes)])
-            else:
-                yield event.plain_result("暂无详细扫书记录。")
-            return
-
-        clean_title = novel['title']
-        clean_author = self._clean_text(novel['author'])
-
-        messages = []
-        record_idx = 0
-        for i, rev in enumerate(reviews, 1):
-            reviewer = self._clean_text(rev['reviewer']) or '匿名'
-            attrs = json.loads(rev['attributes'])
-            attr_title = self._normalize_title(attrs.get("书名", ""))
-            compare_title = target_title or self._normalize_title(novel['title'])
-            if attr_title and compare_title != attr_title:
-                continue
-            record_idx += 1
-            # 记录展示上限由发送批次/单次消息限制控制
-
-            header = f"【记录 #{record_idx}】 {rev['category'] or '扫书'}\n"
-            date_str = rev['review_date']
-            if not self._is_empty_value(date_str):
-                header += f"扫书人：{reviewer} | 日期：{date_str}\n"
-            else:
-                header += f"扫书人：{reviewer}\n"
-
-            source = rev['source_url'] or attrs.get("来源")
-            if source:
-                if isinstance(source, list):
-                    source = source[0]
-                clean_source = re.split(r'[（(]', str(source))[0].strip()
-                header += f"来源：{clean_source}\n"
-            header += "-" * 20 + "\n"
-
-            tag_lines = []
-            for key, value in attrs.items():
-                if self._is_empty_value(value):
-                    continue
-                if key in ["其他说明", "来源"]:
-                    continue
-                if key in ["书名", "作者", "小说作者"] and (clean_title in str(value) or (clean_author and clean_author in str(value))):
-                    continue
-                if isinstance(value, list):
-                    value = "；".join([str(v) for v in value if not self._is_empty_value(v)])
-                    if self._is_empty_value(value):
-                        continue
-                emoji = self.tag_emojis.get(key, "●")
-                if emoji == "●":
-                    for tag, e in self.tag_emojis.items():
-                        if tag in key:
-                            emoji = e
-                            break
-                tag_lines.append(f"{emoji} {key}：{value}")
-
-            content = attrs.get("其他说明")
-            body_lines = list(tag_lines)
-            if content:
-                content_str = self._strip_leading_separators(str(content))
-                if re.search(r"[A-Za-z0-9\u4e00-\u9fff]", content_str):
-                    if body_lines:
-                        body_lines.append("-" * 20)
-                    body_lines.append(content_str)
-
-            body = "\n".join(body_lines)
-            full_msg = (header + body).strip()
-            if not body.strip():
-                continue
-            if self._is_tg_platform(event):
-                # TG 平台不做截断/按配置分段，只在发送时按平台上限拆分
-                messages.append(full_msg)
-            else:
-                max_len = self.max_review_length
-                if self.overflow_strategy == "split" and len(full_msg) > max_len:
-                    split_body_max = max_len - len(header)
-                    if split_body_max <= 0:
-                        chunks = self._split_text(full_msg, max_len)
-                        messages.extend(chunks)
-                    else:
-                        chunks = self._split_text(body.strip(), split_body_max)
-                        for idx, chunk in enumerate(chunks, 1):
-                            part_header = header if idx == 1 else f"{header}（续{idx}）\n"
-                            messages.append((part_header + chunk).strip())
-                else:
-                    final_msg = full_msg
-                    if len(final_msg) > max_len:
-                        final_msg = final_msg[:max_len] + "\n\n……"
-                        logger.warning(f"书籍 ID {novel_id} 的记录 #{record_idx} 长度超过 {max_len}，已截断。")
-                    messages.append(final_msg)
-
-        if self._is_qq_platform(event):
-            nodes = []
-            batch_total_chars = 0
-            batch_count = 1
-            sent_batches = 0
-            for m in messages:
-                current_len = len(m)
-                if nodes and batch_total_chars + current_len > self.max_batch_chars:
-                    logger.info(f"书籍 ID {novel_id} 发送批次 {batch_count}，共 {len(nodes)} 条记录，总字符数: {batch_total_chars}")
-                    yield event.chain_result([Nodes(nodes=nodes)])
-                    sent_batches += 1
-                    if sent_batches >= self.max_messages_per_request:
-                        return
-                    nodes = []
-                    batch_total_chars = 0
-                    batch_count += 1
-                    await asyncio.sleep(0.5)
-                nodes.append(Node(uin=self_id, name=bot_name, content=[Plain(text=m)]))
-                batch_total_chars += current_len
-
-            if nodes:
-                logger.info(f"书籍 ID {novel_id} 发送批次 {batch_count}，共 {len(nodes)} 条记录，总字符数: {batch_total_chars}")
-                yield event.chain_result([Nodes(nodes=nodes)])
-                sent_batches += 1
-        else:
-            if self._is_tg_platform(event) and self._tg_use_fold_default:
-                success = await self._send_tg_expandable_blocks(event, messages)
-                if success:
-                    return
-            sent = 0
-            if self._is_tg_platform(event) and self._tg_use_fold_default and len(messages) > 1:
-                summary = f"共 {len(messages)} 条记录，以下为详情："
-                yield event.plain_result(summary)
-                sent += 1
-            for m in messages:
-                yield event.plain_result(m)
-                sent += 1
 
     @filter.command("扫书统计")
     async def handle_saoshu_stats(self, event: AstrMessageEvent):
