@@ -1,15 +1,21 @@
 import os
-import sqlite3
+import random
 import json
 import asyncio
-import aiosqlite
-import shutil
 import re
+
+import aiosqlite
 from cachetools import TTLCache
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register, StarTools
+from astrbot.api.star import Context, Star, StarTools
 from astrbot.api import logger
 from astrbot.api.message_components import *
+from .utils import (
+    DB_MANIFEST_FILENAME,
+    DEFAULT_DB_FILENAME,
+    DEFAULT_DB_UNAVAILABLE_MESSAGE,
+    DefaultDatabaseManager,
+)
 
 
 class WebnovelBiblePlugin(Star):
@@ -25,11 +31,14 @@ class WebnovelBiblePlugin(Star):
         # 路径设置
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_webnovel_bible")
         os.makedirs(self.data_dir, exist_ok=True)
-        self.db_path = os.path.join(self.data_dir, "webnovel.db")
-        
-        # 资源路径
+        self.db_path = os.path.join(self.data_dir, DEFAULT_DB_FILENAME)
+        self.local_manifest_path = os.path.join(self.data_dir, DB_MANIFEST_FILENAME)
         self.plugin_dir = os.path.dirname(__file__)
-        self.resource_db_path = os.path.join(self.plugin_dir, "resources", "webnovel.db")
+        self.default_db_manager = DefaultDatabaseManager(
+            data_dir=self.data_dir,
+            db_path=self.db_path,
+            local_manifest_path=self.local_manifest_path,
+        )
         # 运行时可用数据库列表（上传优先，其次本地默认库）
         self.db_paths = []
         
@@ -45,6 +54,7 @@ class WebnovelBiblePlugin(Star):
         self.search_states = TTLCache(maxsize=1000, ttl=600)
         self._initialized = False
         self._init_lock = asyncio.Lock()
+        self._startup_check_task: asyncio.Task | None = None
         self._tg_use_fold_default = True
         self._tg_single_message_limit = 3500
         
@@ -123,32 +133,63 @@ class WebnovelBiblePlugin(Star):
                 logger.warning(f"术语文件不存在: {filename}")
         logger.debug(f"术语资源加载完成，共计 {total_loaded} 条记录。")
 
+    def _get_uploaded_db_paths(self) -> list[str]:
+        db_paths = []
+        if not isinstance(self.uploaded_db_files, list):
+            return db_paths
+
+        for rel_path in self.uploaded_db_files:
+            if not isinstance(rel_path, str) or not rel_path:
+                continue
+            candidate_path = os.path.join(self.data_dir, rel_path)
+            if os.path.exists(candidate_path):
+                db_paths.append(candidate_path)
+            else:
+                logger.warning(f"上传的数据库文件不存在: {candidate_path}")
+        return db_paths
+
+    async def _ensure_default_db(self) -> bool:
+        return await self.default_db_manager.ensure_default_db()
+
+    async def _run_startup_db_check(self):
+        try:
+            await self._ensure_initialized()
+        except Exception as e:
+            logger.error(f"启动阶段后台检查默认扫书数据库失败: {e}")
+        finally:
+            self._startup_check_task = None
+
+    async def initialize(self) -> None:
+        if self._startup_check_task and not self._startup_check_task.done():
+            return
+        self._startup_check_task = asyncio.create_task(
+            self._run_startup_db_check(),
+            name="webnovel-bible-startup-db-check",
+        )
+
+    async def terminate(self) -> None:
+        if self._startup_check_task and not self._startup_check_task.done():
+            self._startup_check_task.cancel()
+            try:
+                await self._startup_check_task
+            except asyncio.CancelledError:
+                pass
+        self._startup_check_task = None
+        self.search_states.clear()
+
     async def _ensure_initialized(self):
         async with self._init_lock:
-            if not self._initialized:
-                # 始终使用资源库覆盖数据目录中的默认数据库，确保更新生效
-                if os.path.exists(self.resource_db_path):
-                    shutil.copy(self.resource_db_path, self.db_path)
-                    logger.debug(f"已将数据库从资源目录复制到数据目录: {self.db_path}")
-                else:
-                    logger.error("资源目录中未找到 webnovel.db，请检查插件安装是否完整。")
+            if self._initialized:
+                return
 
-                # 构建可用数据库列表：上传库优先，其次默认库
-                db_paths = []
-                if isinstance(self.uploaded_db_files, list):
-                    for rel_path in self.uploaded_db_files:
-                        if not isinstance(rel_path, str) or not rel_path:
-                            continue
-                        candidate_path = os.path.join(self.data_dir, rel_path)
-                        if os.path.exists(candidate_path):
-                            db_paths.append(candidate_path)
-                        else:
-                            logger.warning(f"上传的数据库文件不存在: {candidate_path}")
-                # 默认库兜底
-                if os.path.exists(self.db_path):
-                    db_paths.append(self.db_path)
-                self.db_paths = db_paths
-                self._initialized = True
+            await self._ensure_default_db()
+
+            db_paths = self._get_uploaded_db_paths()
+            if os.path.exists(self.db_path) and await self.default_db_manager.validate_db(self.db_path):
+                db_paths.append(self.db_path)
+
+            self.db_paths = db_paths
+            self._initialized = True
 
     def _get_user_state(self, user_id: str):
         if user_id not in self.search_states:
@@ -161,13 +202,14 @@ class WebnovelBiblePlugin(Star):
 
     @filter.command("扫书")
     async def handle_saoshu(self, event: AstrMessageEvent):
-        """网文扫书宝典查询
-        用法: 
+        """
         /扫书 <书名/作者> - 搜索书籍
         /扫书 <书名/作者> <序号> - 搜索并直接查看第 N 个结果
         /扫书 <序号> - 查看搜索结果中的详细信息
         """
-        await self._ensure_initialized()
+        if not self._initialized or not self.db_paths:
+            yield event.plain_result(DEFAULT_DB_UNAVAILABLE_MESSAGE)
+            return
         
         parts = event.message_str.strip().split()
         if len(parts) < 2:
@@ -222,6 +264,59 @@ class WebnovelBiblePlugin(Star):
 
         # 执行搜索
         async for res in self.search_novels(event, query, state, direct_idx):
+            yield res
+
+
+    @filter.command("搜扫书", alias={"搜书评"})
+    async def handle_search_review(self, event: AstrMessageEvent):
+        """
+        /搜扫书 <关键词> - 搜索书评中包含关键词的书籍
+        /搜扫书 <关键词> <序号> - 搜索并直接查看第 N 个结果
+        """
+        if not self._initialized or not self.db_paths:
+            yield event.plain_result(DEFAULT_DB_UNAVAILABLE_MESSAGE)
+            return
+
+        parts = event.message_str.strip().split()
+        if len(parts) < 2:
+            yield event.plain_result("请输入关键词在扫书记录中搜索，例如: /搜扫书 宁雨昔")
+            return
+
+        user_id = event.get_sender_id()
+        state = self._get_user_state(user_id)
+
+        # 识别末尾的序号
+        direct_idx = None
+        keyword = " ".join(parts[1:])
+        if len(parts) > 2 and parts[-1].isdigit():
+            direct_idx = int(parts[-1]) - 1
+            keyword = " ".join(parts[1:-1])
+
+        # 纯序号选择结果
+        if keyword.isdigit() and direct_idx is None:
+            idx = int(keyword) - 1
+            if state["results"] and 0 <= idx < len(state["results"]):
+                r = state["results"][idx]
+                detail = {
+                    "novel_id": r["id"],
+                    "db_path": r.get("db_path"),
+                    "title": r.get("title"),
+                    "ids_by_db": r.get("ids_by_db"),
+                    "offset": 0,
+                }
+                state["detail"] = detail
+                async for res in self._send_paged_details(event, detail):
+                    yield res
+                return
+            else:
+                yield event.plain_result(f"序号 {keyword} 超出搜索结果范围。")
+                return
+
+        if len(keyword) < 2:
+            yield event.plain_result("关键词至少 2 个字符。")
+            return
+
+        async for res in self.search_content(event, keyword, state, direct_idx):
             yield res
 
 
@@ -321,7 +416,6 @@ class WebnovelBiblePlugin(Star):
         yield event.plain_result(msg.strip())
 
     async def search_novels(self, event, query, state, direct_idx=None):
-        logger.debug(f"正在数据库中搜索书籍: {query}")
         # 多库搜索：上传库优先
         sql = """
             SELECT n.id, n.title, n.author, n.platform, n.aliases,
@@ -352,7 +446,7 @@ class WebnovelBiblePlugin(Star):
             yield event.plain_result(f"未找到与 '{query}' 相关的书籍。")
             return
 
-        # 去重：同名书合并为一个结果，保留各库对应 id
+        # 去重：同名书合并为一个结果，保留各库对应 id，跨库累加 review_count
         dedup = {}
         for source_priority, r, db_path in rows:
             key = self._normalize_title(r["title"])
@@ -362,11 +456,13 @@ class WebnovelBiblePlugin(Star):
                     "source_priority": source_priority,
                     "db_path": db_path,
                     "ids_by_db": {db_path: r["id"]},
+                    "total_review_count": r["review_count"],
                 }
                 continue
 
             entry = dedup[key]
             entry["ids_by_db"][db_path] = r["id"]
+            entry["total_review_count"] += r["review_count"]
             # 选择展示行：优先级更高 > 同优先级记录数更多
             if source_priority < entry["source_priority"]:
                 entry["row"] = r
@@ -377,7 +473,7 @@ class WebnovelBiblePlugin(Star):
                     entry["row"] = r
 
         rows = list(dedup.values())
-        rows.sort(key=lambda v: (0 if v["row"]["title"] == query else 1, -v["row"]["review_count"]))
+        rows.sort(key=lambda v: (0 if v["row"]["title"] == query else 1, -v["total_review_count"]))
 
         logger.info(f"搜索到 {len(rows)} 本书籍。")
         
@@ -390,11 +486,11 @@ class WebnovelBiblePlugin(Star):
 
         if direct_idx is not None:
             if 0 <= direct_idx < len(rows):
-                logger.debug(f"直接跳转到搜索结果的第 {direct_idx + 1} 项: {rows[direct_idx]['title']}")
+                logger.debug(f"直接跳转到搜索结果的第 {direct_idx + 1} 项: {rows[direct_idx]['row']['title']}")
                 detail = {
-                    "novel_id": rows[direct_idx]["id"],
+                    "novel_id": rows[direct_idx]["row"]["id"],
                     "db_path": rows[direct_idx]["db_path"],
-                    "title": rows[direct_idx]["title"],
+                    "title": rows[direct_idx]["row"]["title"],
                     "ids_by_db": rows[direct_idx]["ids_by_db"],
                     "offset": 0,
                 }
@@ -428,9 +524,133 @@ class WebnovelBiblePlugin(Star):
                     resp += f"{i}. 《{row['title']}》 - {author}\n"
                 else:
                     resp += f"{i}. 《{row['title']}》\n"
-            resp += "\n请输入 '/扫书 <序号>' 查看详细扫书记录。"
+            resp += "\u200b\n请输入 '/扫书 <序号>' 查看详细扫书记录。"
             yield event.plain_result(resp)
             state["detail"] = None
+
+    async def search_content(self, event, keyword, state, direct_idx=None):
+        safe_keyword = keyword.replace('%', '\\%').replace('_', '\\_')
+        search_pattern = f"%{safe_keyword}%"
+
+        sql = """
+            SELECT n.id, n.title, n.author, n.platform, n.aliases,
+                   COUNT(DISTINCT m.review_id) as review_count,
+                   r.attributes as match_attributes,
+                   r.category as match_category
+            FROM novels n
+            JOIN novel_review_map m ON n.id = m.novel_id
+            JOIN reviews r ON r.id = m.review_id
+            WHERE r.attributes LIKE ?
+            GROUP BY n.id
+            ORDER BY review_count DESC
+            LIMIT 20
+        """
+
+        rows = []
+        for source_priority, db_path in enumerate(self.db_paths):
+            async with aiosqlite.connect(db_path) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(sql, (search_pattern,)) as cursor:
+                    db_rows = await cursor.fetchall()
+                for r in db_rows:
+                    rows.append((source_priority, r, db_path))
+
+        if not rows:
+            yield event.plain_result(f"未在书评中找到包含 '{keyword}' 的书籍。")
+            return
+
+        # 去重：同名书合并，跨库累加 review_count
+        dedup = {}
+        for source_priority, r, db_path in rows:
+            key = self._normalize_title(r["title"])
+            if key not in dedup:
+                dedup[key] = {
+                    "row": r,
+                    "source_priority": source_priority,
+                    "db_path": db_path,
+                    "ids_by_db": {db_path: r["id"]},
+                    "match_attributes": r["match_attributes"],
+                    "match_category": r["match_category"],
+                    "total_review_count": r["review_count"],
+                }
+                continue
+            entry = dedup[key]
+            entry["ids_by_db"][db_path] = r["id"]
+            entry["total_review_count"] += r["review_count"]
+            if source_priority < entry["source_priority"]:
+                entry["row"] = r
+                entry["source_priority"] = source_priority
+                entry["db_path"] = db_path
+                entry["match_attributes"] = r["match_attributes"]
+            elif source_priority == entry["source_priority"]:
+                if r["review_count"] > entry["row"]["review_count"]:
+                    entry["row"] = r
+                    entry["match_attributes"] = r["match_attributes"]
+
+        rows = list(dedup.values())
+        rows.sort(key=lambda v: -v["total_review_count"])
+
+        # 提取每本书的匹配节选
+        results_with_snippets = []
+        for v in rows[:20]:
+            attrs = json.loads(v["match_attributes"])
+            field_name, snippet = self._extract_match_snippet(attrs, keyword)
+            results_with_snippets.append((v, field_name, snippet))
+
+        # 存入 state，保持与 search_novels 一致的结构
+        state["results"] = [
+            {"id": v[0]["row"]["id"], "title": v[0]["row"]["title"], "db_path": v[0]["db_path"], "ids_by_db": v[0]["ids_by_db"]}
+            for v in results_with_snippets
+        ]
+        state["keyword"] = keyword
+
+        if direct_idx is not None:
+            if 0 <= direct_idx < len(results_with_snippets):
+                v, _, _ = results_with_snippets[direct_idx]
+                detail = {
+                    "novel_id": v["row"]["id"],
+                    "db_path": v["db_path"],
+                    "title": v["row"]["title"],
+                    "ids_by_db": v["ids_by_db"],
+                    "offset": 0,
+                }
+                state["detail"] = detail
+                async for res in self._send_paged_details(event, detail):
+                    yield res
+                return
+
+        if len(results_with_snippets) == 1:
+            v, _, _ = results_with_snippets[0]
+            detail = {
+                "novel_id": v["row"]["id"],
+                "db_path": v["db_path"],
+                "title": v["row"]["title"],
+                "ids_by_db": v["ids_by_db"],
+                "offset": 0,
+            }
+            state["detail"] = detail
+            async for res in self._send_paged_details(event, detail):
+                yield res
+            return
+
+        resp = f"在书评中搜索到 \"{keyword}\" 相关的书籍：\n"
+        for i, (v, field_name, snippet) in enumerate(results_with_snippets, 1):
+            if i > 1:
+                resp += "\n"
+            row = v["row"]
+            author = row["author"]
+            author_str = f" - {author}" if not self._is_empty_value(author) else ""
+            resp += f"{i}. 《{row['title']}》{author_str} [共 {v['total_review_count']} 条书评]\n"
+            if field_name and snippet:
+                emoji = self.tag_emojis.get(field_name, "●")
+                resp += f"   {emoji} {field_name}: {snippet}\n"
+
+        if len(results_with_snippets) == 20:
+            resp += "\n结果较多，仅显示前 20 本。建议使用更具体的关键词缩小范围。"
+
+        resp += "\u200b\n请输入 '/扫书 <序号>' 查看完整扫书记录。"
+        yield event.plain_result(resp)
+        state["detail"] = None
 
     def _clean_text(self, text):
         if not text:
@@ -469,6 +689,21 @@ class WebnovelBiblePlugin(Star):
         if m:
             return m.group(1).strip()
         return re.sub(r"[《》]", "", title).strip()
+
+    def _extract_match_snippet(self, attrs: dict, keyword: str, context=15):
+        for key, value in attrs.items():
+            text = str(value)
+            idx = text.lower().find(keyword.lower())
+            if idx != -1:
+                start = max(0, idx - context)
+                end = min(len(text), idx + len(keyword) + context)
+                snippet = text[start:end]
+                if start > 0:
+                    snippet = "..." + snippet
+                if end < len(text):
+                    snippet = snippet + "..."
+                return (key, snippet)
+        return (None, None)
 
     def _get_platform_name(self, event: AstrMessageEvent) -> str:
         try:
@@ -668,6 +903,8 @@ class WebnovelBiblePlugin(Star):
                         reviews.append((source_priority, r))
                     break
 
+        title_display = novel['title'] if novel else '?'
+        logger.info(f"扫书记录汇总: 《{title_display}》 共 {len(reviews)} 条")
         if not novel:
             return []
 
@@ -745,12 +982,18 @@ class WebnovelBiblePlugin(Star):
                     split_body_max = max_len - len(header)
                     if split_body_max <= 0:
                         chunks = self._split_text(full_msg, max_len)
-                        messages.extend(chunks)
+                        for i, chunk in enumerate(chunks):
+                            if i < len(chunks) - 1:
+                                chunk += "……"
+                            messages.append(chunk)
                     else:
                         chunks = self._split_text(body.strip(), split_body_max)
                         for idx, chunk in enumerate(chunks, 1):
                             part_header = header if idx == 1 else f"{header}（续{idx}）\n"
-                            messages.append((part_header + chunk).strip())
+                            msg = (part_header + chunk).strip()
+                            if idx < len(chunks):
+                                msg += "……"
+                            messages.append(msg)
                 else:
                     final_msg = full_msg
                     if len(final_msg) > max_len:
@@ -758,12 +1001,28 @@ class WebnovelBiblePlugin(Star):
                         logger.warning(f"书籍 ID {novel_id} 的记录 #{record_idx} 长度超过 {max_len}，已截断。")
                     messages.append(final_msg)
 
-        return messages
+        if messages:
+            clean_title = novel["title"]
+            clean_author = self._clean_text(novel["author"])
+            header = f"📖 《{clean_title}》"
+            if not self._is_empty_value(clean_author):
+                header += f" - {clean_author}"
+            # 统计实际加入 messages 中的记录条数（排除续接 chunk）
+            display_count = sum(
+                1 for m in messages
+                if '（续' not in m and m.split('\n')[0].startswith('【记录 #')
+            )
+            header += f"\n共 {display_count} 条扫书记录："
+            messages.insert(0, header)
+            record_idx = display_count
+
+        return messages, record_idx
 
     async def _send_paged_details(self, event: AstrMessageEvent, detail: dict):
         messages = detail.get("messages")
+        records_count = detail.get("records_count")
         if messages is None:
-            messages = await self._collect_messages(
+            messages, records_count = await self._collect_messages(
                 event,
                 detail.get("novel_id"),
                 detail.get("db_path"),
@@ -771,6 +1030,7 @@ class WebnovelBiblePlugin(Star):
                 detail.get("ids_by_db"),
             )
             detail["messages"] = messages
+            detail["records_count"] = records_count
             detail["offset"] = detail.get("offset", 0)
 
         if not messages:
@@ -791,37 +1051,60 @@ class WebnovelBiblePlugin(Star):
             batch_count = 1
             sent_batches = 0
             idx = offset
-            
+            # 当前批次是否已包含至少一条非头信息的真实书评
+            has_review_in_batch = False
+
+            def _remaining_records() -> int:
+                cnt = 0
+                for i in range(idx, len(messages)):
+                    m = messages[i]
+                    if '（续' in m:
+                        continue
+                    if m.split('\n')[0].startswith('【记录 #'):
+                        cnt += 1
+                return cnt
+
             while idx < len(messages):
                 m = messages[idx]
                 current_len = len(m)
-                
+
                 # 如果当前节点列表不为空，且加上这条会超长，则先发送当前批次
                 if nodes and batch_total_chars + current_len > self.max_batch_chars:
-                    # 检查是否是本轮最后一次发送，若是且还有剩余，则塞入提示
-                    if sent_batches + 1 >= self.max_messages_per_request and idx < len(messages):
-                        nodes.append(Node(uin=self_id, name=bot_name, content=[Plain(text=f"💡 还有 {len(messages) - idx} 条记录，发送“/扫书 n”获取下一批。")]))
-                    
-                    yield event.chain_result([Nodes(nodes=nodes)])
-                    sent_batches += 1
-                    
-                    if sent_batches >= self.max_messages_per_request:
-                        nodes = [] # 清空，防止下方重复发送
-                        break
-                    
-                    nodes = []
-                    batch_total_chars = 0
-                    batch_count += 1
-                    await asyncio.sleep(0.5)
+                    # 如果当前批次只有头信息（无书评），强制合并下一条，避免头信息单独成卡
+                    if not has_review_in_batch:
+                        pass
+                    else:
+                        # 检查是否是本轮最后一次发送，若是且还有剩余，则塞入提示
+                        if sent_batches + 1 >= self.max_messages_per_request and idx < len(messages):
+                            remaining = _remaining_records()
+                            if remaining:
+                                nodes.append(Node(uin=self_id, name=bot_name, content=[Plain(text=f"💡 还有 {remaining} 条记录，发送“/扫书 n”获取下一批。")]))
+
+                        yield event.chain_result([Nodes(nodes=nodes)])
+                        sent_batches += 1
+
+                        if sent_batches >= self.max_messages_per_request:
+                            nodes = [] # 清空，防止下方重复发送
+                            break
+
+                        nodes = []
+                        batch_total_chars = 0
+                        has_review_in_batch = False
+                        batch_count += 1
+                        await asyncio.sleep(0.5)
 
                 nodes.append(Node(uin=self_id, name=bot_name, content=[Plain(text=m)]))
                 batch_total_chars += current_len
+                # 头信息之后的消息才标记为"已含书评"，确保头信息不被单独发出去
+                if not (offset == 0 and idx == offset):
+                    has_review_in_batch = True
                 idx += 1
 
             # 处理最后一批残余节点
             if nodes:
-                if idx < len(messages):
-                    nodes.append(Node(uin=self_id, name=bot_name, content=[Plain(text=f"💡 还有 {len(messages) - idx} 条记录，发送“/扫书 n”获取下一批。")]))
+                remaining = _remaining_records() if idx < len(messages) else 0
+                if remaining:
+                    nodes.append(Node(uin=self_id, name=bot_name, content=[Plain(text=f"💡 还有 {remaining} 条记录，发送“/扫书 n”获取下一批。")]))
                 yield event.chain_result([Nodes(nodes=nodes)])
 
             detail["offset"] = idx
@@ -835,7 +1118,11 @@ class WebnovelBiblePlugin(Star):
             if chunk:
                 # 如果没发完，在最后一条追加提示
                 if end < len(messages):
-                    chunk.append(f"💡 还有 {len(messages) - end} 条记录，发送“/扫书 n”获取下一批。")
+                    remaining = sum(
+                        1 for m in messages[end:]
+                        if '（续' not in m and m.split('\n')[0].startswith('【记录 #')
+                    )
+                    chunk.append(f"💡 还有 {remaining} 条记录，发送“/扫书 n”获取下一批。")
                 
                 detail["offset"] = end
                 success = await self._send_tg_expandable_blocks(event, chunk, total_count=len(messages))
@@ -855,14 +1142,92 @@ class WebnovelBiblePlugin(Star):
         
         # 提示逻辑
         if end < len(messages):
-            yield event.plain_result(f"💡 还有 {len(messages) - end} 条记录，发送“/扫书 n”获取下一批。")
+            remaining = sum(
+                1 for m in messages[end:]
+                if '（续' not in m and m.split('\n')[0].startswith('【记录 #')
+            )
+            yield event.plain_result(f"💡 还有 {remaining} 条记录，发送“/扫书 n”获取下一批。")
             
         detail["offset"] = end
+
+    @filter.command("随机扫书")
+    async def handle_random_saoshu(self, event: AstrMessageEvent):
+        """随机获取一本扫书记录"""
+        if not self._initialized or not self.db_paths:
+            yield event.plain_result(DEFAULT_DB_UNAVAILABLE_MESSAGE)
+            return
+
+        # 按各库书籍数量加权随机选库，再从该库随机选一本书
+        counts = []
+        for dbp in self.db_paths:
+            try:
+                async with aiosqlite.connect(dbp) as db:
+                    async with db.execute("SELECT COUNT(*) FROM novels") as cursor:
+                        cnt = (await cursor.fetchone())[0]
+                    counts.append((dbp, cnt))
+            except Exception as e:
+                logger.warning(f"查询数据库 {dbp} 书籍数量失败: {e}")
+                counts.append((dbp, 0))
+
+        total = sum(c for _, c in counts)
+        if total == 0:
+            yield event.plain_result("数据库中暂无书籍记录。")
+            return
+
+        r = random.randint(0, total - 1)
+        cumulative = 0
+        chosen_dbp = None
+        for dbp, cnt in counts:
+            cumulative += cnt
+            if r < cumulative:
+                chosen_dbp = dbp
+                break
+        if not chosen_dbp:
+            chosen_dbp = counts[-1][0]
+
+        async with aiosqlite.connect(chosen_dbp) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT id, title FROM novels ORDER BY RANDOM() LIMIT 1") as cursor:
+                row = await cursor.fetchone()
+            if not row:
+                yield event.plain_result("随机取书失败，请重试。")
+                return
+            novel_id, title = row["id"], row["title"]
+
+        # 以标准化标题匹配所有库中的同本书，构建完整 ids_by_db
+        normalized = self._normalize_title(title)
+        ids_by_db = {}
+
+        for dbp in self.db_paths:
+            try:
+                async with aiosqlite.connect(dbp) as db:
+                    db.row_factory = aiosqlite.Row
+                    async with db.execute(
+                        "SELECT id, title FROM novels WHERE title LIKE ? LIMIT 1",
+                        (f"%{normalized}%",)
+                    ) as cursor:
+                        match = await cursor.fetchone()
+                    if match and self._normalize_title(match["title"]) == normalized:
+                        ids_by_db[dbp] = match["id"]
+            except Exception:
+                continue
+
+        detail = {
+            "novel_id": novel_id,
+            "db_path": chosen_dbp,
+            "title": title,
+            "ids_by_db": ids_by_db,
+            "offset": 0,
+        }
+        async for res in self._send_paged_details(event, detail):
+            yield res
 
     @filter.command("扫书统计")
     async def handle_saoshu_stats(self, event: AstrMessageEvent):
         """查看扫书宝典统计信息"""
-        await self._ensure_initialized()
+        if not self._initialized or not self.db_paths:
+            yield event.plain_result("暂无可用扫书数据库。默认数据库可能仍未下载成功。")
+            return
         novel_count = 0
         review_count = 0
         uploaded_novel_count = 0
